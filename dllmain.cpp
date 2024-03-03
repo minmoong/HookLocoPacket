@@ -15,8 +15,8 @@
 #include <bson.h>
 #include <windows.h>
 
-// Kakaotalk.exe에서 후킹할 어셈블리어 코드
-BYTE g_bTargetPattern[] = {
+// KakaoTalk.exe에서 후킹할 어셈블리어 코드 (Send)
+BYTE g_sendTargetPattern[] = {
     0xFF, 0x75, 0x10,            // PUSH DWORD PTR SS:[EBP+10]
     0x8B, 0xCF,                  // MOV ECX, EDI
     0xFF, 0x75, 0x0C,            // PUSH DWORD PTR SS:[EBP+C]
@@ -24,22 +24,36 @@ BYTE g_bTargetPattern[] = {
     0xE8, 0x7B, 0x9F, 0x02, 0x00 // CALL kakaotalk.XXXXXXXX
 };
 
-HMODULE g_hModuleKakao = NULL;
-HANDLE g_hProcessKakao = NULL;
-DWORD g_dwReturnAddress = NULL;
-DWORD g_dwOriginalCallAddress = NULL;
+// KakaoTalk.exe에서 후킹할 어셈블리어 코드 (Recv)
+BYTE g_recvTargetPattern[] = {
+    0xE8, 0xBC, 0x6E, 0xF0, 0xFF, // CALL kakaotalk.XXXXXXXX        ; 복호화 함수 호출
+    0x8B, 0x44, 0x24, 0x28,       // MOV EAX, DWORD PTR SS:[ESP+28]
+    0x83, 0xC4, 0x20,             // ADD ESP, 20
+    0x89, 0x46, 0x3C,             // MOV DWORD PTR DS:[ESI+3C], EAX
+    0xB8, 0x01, 0x00, 0x00, 0x00  // MOV EAX, 1
+};
 
-LPCSTR szSendSignature = "\033[1;34m[Send Packet]\033[0m \n";
-LPCSTR szPacketIdFormat = "Packet ID: %d \n";
-LPCSTR szStatusCodeFormat = "Status Code: %hd \n";
-LPCSTR szMethodFormat = "Method: %.11s \n";
-LPCSTR szBodyTypeFormat = "Body Type: 0x%hhx \n";
-LPCSTR szBodyLengthFormat = "Body Length: %d \n";
+HMODULE g_moduleKakao   = NULL;
+HANDLE g_processKakao   = NULL;
+DWORD g_sendRetAddr     = NULL;
+DWORD g_recvRetAddr     = NULL;
+DWORD g_sendOrgCallAddr = NULL;
 
-DWORD WINAPI ThreadProc(LPVOID lpParam);
-DWORD FindPattern();
-void HookSend();
-void PrintBodyContents(BYTE* bBody, DWORD dwSize);
+LPCSTR g_sendSignature    = "\033[1;32m" "[Send]" "\033[0m" "\n";
+LPCSTR g_recvSignature    = "\033[1;33m" "[Recv]" "\033[0m" "\n";
+LPCSTR g_packetIdFormat   = "Packet ID: %d \n";
+LPCSTR g_statusCodeFormat = "Status Code: %hd \n";
+LPCSTR g_methodFormat     = "Method: %.11s \n";
+LPCSTR g_bodyTypeFormat   = "Body Type: 0x%hhx \n";
+LPCSTR g_bodyLengthFormat = "Body Length: %d \n";
+
+DWORD WINAPI ThreadProc(LPVOID);
+DWORD FindPattern(BYTE*, DWORD);
+BOOL SendHook();
+BOOL RecvHook();
+void SendPacketPrintRoutine();
+void RecvPacketPrintRoutine();
+void PrintLocoPacket(BYTE*);
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
@@ -51,8 +65,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         // GetModuleHandleA 함수의 반환값은
         // 내부적으로 KakaoTalk.exe의 PE image의 base address를 의미함
-        g_hModuleKakao = GetModuleHandleA("KakaoTalk.exe");
-        g_hProcessKakao = GetCurrentProcess();
+        g_moduleKakao = GetModuleHandleA("KakaoTalk.exe");
+        g_processKakao = GetCurrentProcess();
 
         // Kakaotalk.exe의 실행 흐름을 방해하지 않도록 별도의 쓰레드 생성
         if (!CreateThread(NULL, 0, ThreadProc, NULL, 0, NULL)) {
@@ -69,49 +83,27 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 }
 
 DWORD WINAPI ThreadProc(LPVOID lpParam) {
-    // 패턴 찾기
-    DWORD dwTargetAddress = FindPattern();
-
-    if (!dwTargetAddress) {
-        printf("Target address not found. \n");
+    if (!SendHook()) {
+        printf("SendHook failed. \n");
         return 1;
     }
 
-    // 후킹 후 리턴할 주소 저장
-    g_dwReturnAddress = dwTargetAddress + sizeof(g_bTargetPattern);
-
-    // 원래 CALL 명령의 절대 주소 저장
-    g_dwOriginalCallAddress = g_dwReturnAddress + 0x00029F7B;
-
-    // CALL 명령어 덮어 씌우기
-    DWORD dwJmpAddress = (DWORD)HookSend - g_dwReturnAddress;
-    g_bTargetPattern[11] = 0xE9;
-    memcpy(g_bTargetPattern + 12, &dwJmpAddress, sizeof(DWORD));
-
-    if (!WriteProcessMemory(
-        g_hProcessKakao,
-        (LPVOID)dwTargetAddress,
-        g_bTargetPattern,
-        sizeof(g_bTargetPattern),
-        NULL
-    )) {
-        printf("WriteProcessMemory failed. Error: %d \n", GetLastError());
+    if (!RecvHook()) {
+        printf("RecvHook failed. \n");
         return 1;
     }
-
-    return 0;
 }
 
-DWORD FindPattern() {
+DWORD FindPattern(BYTE* targetPattern, DWORD size) {
     // 미리 알아낸 KakaoTalk.exe의 PE image의 size
-    DWORD dwImageSize = 0x3E4E000;
+    DWORD imageSize = 0x3E4E000;
 
-    BYTE* buffer = (BYTE*)malloc(dwImageSize);
+    BYTE* buffer = (BYTE*)malloc(imageSize);
     if (!ReadProcessMemory(
-        g_hProcessKakao,
-        (LPCVOID)g_hModuleKakao,
+        g_processKakao,
+        (LPCVOID)g_moduleKakao,
         buffer,
-        dwImageSize,
+        imageSize,
         NULL
     )) {
         printf("ReadProcessMemory failed. Error: %d \n", GetLastError());
@@ -119,10 +111,10 @@ DWORD FindPattern() {
         return 0;
     }
 
-    for (DWORD i = 0; i < dwImageSize - sizeof(g_bTargetPattern); i++) {
-        if (memcmp((BYTE*)(buffer + i), g_bTargetPattern, sizeof(g_bTargetPattern)) == 0) {
+    for (DWORD i = 0; i < imageSize - size; i++) {
+        if (memcmp((BYTE*)(buffer + i), targetPattern, size) == 0) {
             free(buffer);
-            return (DWORD)g_hModuleKakao + i;
+            return (DWORD)g_moduleKakao + i;
         }
     }
 
@@ -130,64 +122,82 @@ DWORD FindPattern() {
     return 0;
 }
 
-void __declspec(naked) HookSend() {
-    __asm {
-        pushad
+BOOL SendHook() {
+    // 패턴 찾기
+    DWORD targetSize = sizeof(g_sendTargetPattern);
+    DWORD targetAddress = FindPattern(g_sendTargetPattern, targetSize);
 
-        mov ebx, [ebp + 8]
+    if (!targetAddress) {
+        printf("Target address not found. \n");
+        return FALSE;
+    }
 
-        push szSendSignature
-        call printf
-        add esp, 4
+    // 후킹 후 리턴할 주소 저장
+    g_sendRetAddr = targetAddress + targetSize;
 
-        push [ebx]
-        push szPacketIdFormat
-        call printf
-        add esp, 8
+    // 원래 CALL 명령의 절대 주소 저장
+    g_sendOrgCallAddr = g_sendRetAddr + 0x00029F7B;
 
-        push [ebx + 4]
-        push szStatusCodeFormat
-        call printf
-        add esp, 8
+    // CALL 명령어 덮어 씌우기
+    DWORD jmpAddress = (DWORD)SendPacketPrintRoutine - g_sendRetAddr;
+    g_sendTargetPattern[11] = 0xE9;
+    memcpy(g_sendTargetPattern + 12, &jmpAddress, sizeof(DWORD));
 
-        add ebx, 6
-        push ebx
-        sub ebx, 6
-        push szMethodFormat
-        call printf
-        add esp, 8
+    if (!WriteProcessMemory(
+        g_processKakao,
+        (LPVOID)targetAddress,
+        g_sendTargetPattern,
+        targetSize,
+        NULL
+    )) {
+        printf("WriteProcessMemory failed. Error: %d \n", GetLastError());
+        return FALSE;
+    }
 
-        push [ebx + 17]
-        push szBodyTypeFormat
-        call printf
-        add esp, 8
+    return TRUE;
+}
 
-        push [ebx + 18]
-        push szBodyLengthFormat
-        call printf
-        add esp, 8
+BOOL RecvHook() {
+    // 패턴 찾기
+    DWORD targetSize = sizeof(g_recvTargetPattern);
+    DWORD targetAddress = FindPattern(g_recvTargetPattern, targetSize);
 
-        push [ebx + 18]
-        add ebx, 22
-        push ebx
-        sub ebx, 22
-        call PrintBodyContents
-        add esp, 8
+    if (!targetAddress) {
+        printf("Target address not found. \n");
+        return FALSE;
+    }
 
-        popad
+    // 후킹 후 리턴할 주소 저장
+    g_recvRetAddr = targetAddress + targetSize;
 
-        mov eax, g_dwOriginalCallAddress
-        call eax
+    // 명령어 덮어 씌우기
+    DWORD jmpAddress = (DWORD)RecvPacketPrintRoutine - g_recvRetAddr;
+    g_recvTargetPattern[15] = 0xE9;
+    memcpy(g_recvTargetPattern + 16, &jmpAddress, sizeof(DWORD));
 
-        jmp g_dwReturnAddress
+    if (!WriteProcessMemory(
+        g_processKakao,
+        (LPVOID)targetAddress,
+        g_recvTargetPattern,
+        targetSize,
+        NULL
+    )) {
+        printf("WriteProcessMemory failed. Error: %d \n", GetLastError());
+        return FALSE;
     }
 }
 
-void PrintBodyContents(BYTE* bBody, DWORD dwSize) {
+void PrintLocoPacket(BYTE* locoPacket) {
+    printf(g_packetIdFormat, *(DWORD*)locoPacket);
+    printf(g_statusCodeFormat, *(WORD*)(locoPacket + 4));
+    printf(g_methodFormat, locoPacket + 6);
+    printf(g_bodyTypeFormat, *(locoPacket + 17));
+    printf(g_bodyLengthFormat, *(DWORD*)(locoPacket + 18));
+
     bson_t* bson;
     CHAR* json;
 
-    bson = bson_new_from_data(bBody, dwSize);
+    bson = bson_new_from_data(locoPacket + 22, *(DWORD*)(locoPacket + 18));
     json = bson_as_json(bson, NULL);
 
     printf("Body Contents: %s \n", json);
@@ -196,4 +206,50 @@ void PrintBodyContents(BYTE* bBody, DWORD dwSize) {
 
     bson_free(json);
     bson_destroy(bson);
+}
+
+void __declspec(naked) SendPacketPrintRoutine() {
+    __asm {
+        pushad
+
+        mov ebx, [ebp + 8]
+
+        push g_sendSignature
+        call printf
+        add esp, 4
+
+        push ebx
+        call PrintLocoPacket
+        add esp, 4
+
+        popad
+
+        mov eax, g_sendOrgCallAddr
+        call eax
+
+        jmp g_sendRetAddr
+    }
+}
+
+void __declspec(naked) RecvPacketPrintRoutine() {
+    __asm {
+        cmp [esp - 8], 0
+        jne $+31
+
+        pushad
+
+        push g_recvSignature
+        call printf
+        add esp, 4
+
+        push ebx
+        call PrintLocoPacket
+        add esp, 4
+
+        popad
+
+        mov eax, 1
+
+        jmp g_recvRetAddr
+    }
 }
