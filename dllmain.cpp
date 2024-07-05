@@ -3,8 +3,9 @@
  *
  * Copyright (c) minmoong. Licensed under the MIT Licence.
  *
- * Title       | HookLocoPacket.dll
- * Description | Get KakaoTalk.exe packet's field through DLL injection.
+ * Title            | HookLocoPacket.dll
+ * Description      | Get KakaoTalk.exe packet's field through DLL injection.
+ * Test Environment | KakaoTalk PC 4.0.6.3920
  */
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -15,18 +16,18 @@
 #include <bson.h>
 #include <windows.h>
 
-// KakaoTalk.exe¿¡¼­ ÈÄÅ·ÇÒ ¾î¼Àºí¸®¾î ÄÚµå (Send)
+// KakaoTalk.exeì—ì„œ í›„í‚¹í•  ì–´ì…ˆë¸”ë¦¬ì–´ ì½”ë“œ (Send)
 BYTE g_sendTargetPattern[] = {
     0xFF, 0x75, 0x10,            // PUSH DWORD PTR SS:[EBP+10]
     0x8B, 0xCF,                  // MOV ECX, EDI
     0xFF, 0x75, 0x0C,            // PUSH DWORD PTR SS:[EBP+C]
     0xFF, 0x75, 0x08,            // PUSH DWORD PTR SS:[EBP+8]
-    0xE8, 0x7B, 0x9F, 0x02, 0x00 // CALL kakaotalk.XXXXXXXX
+    0xE8, 0x5A, 0xA8, 0x02, 0x00 // CALL kakaotalk.XXXXXXXX
 };
 
-// KakaoTalk.exe¿¡¼­ ÈÄÅ·ÇÒ ¾î¼Àºí¸®¾î ÄÚµå (Recv)
+// KakaoTalk.exeì—ì„œ í›„í‚¹í•  ì–´ì…ˆë¸”ë¦¬ì–´ ì½”ë“œ (Recv)
 BYTE g_recvTargetPattern[] = {
-    0xE8, 0xBC, 0x6E, 0xF0, 0xFF, // CALL kakaotalk.XXXXXXXX        ; º¹È£È­ ÇÔ¼ö È£Ãâ
+    0xE8, 0xBC, 0x6E, 0xF0, 0xFF, // CALL kakaotalk.XXXXXXXX        ; ë³µí˜¸í™” í•¨ìˆ˜ í˜¸ì¶œ
     0x8B, 0x44, 0x24, 0x28,       // MOV EAX, DWORD PTR SS:[ESP+28]
     0x83, 0xC4, 0x20,             // ADD ESP, 20
     0x89, 0x46, 0x3C,             // MOV DWORD PTR DS:[ESI+3C], EAX
@@ -63,12 +64,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         system("chcp 65001");
         system("cls");
 
-        // GetModuleHandleA ÇÔ¼öÀÇ ¹İÈ¯°ªÀº
-        // ³»ºÎÀûÀ¸·Î KakaoTalk.exeÀÇ PE imageÀÇ base address¸¦ ÀÇ¹ÌÇÔ
+        // GetModuleHandleA í•¨ìˆ˜ì˜ ë°˜í™˜ê°’ì€
+        // ë‚´ë¶€ì ìœ¼ë¡œ KakaoTalk.exeì˜ PE imageì˜ base addressë¥¼ ì˜ë¯¸í•¨
         g_moduleKakao = GetModuleHandleA("KakaoTalk.exe");
         g_processKakao = GetCurrentProcess();
 
-        // Kakaotalk.exeÀÇ ½ÇÇà Èå¸§À» ¹æÇØÇÏÁö ¾Êµµ·Ï º°µµÀÇ ¾²·¹µå »ı¼º
+        // Kakaotalk.exeì˜ ì‹¤í–‰ íë¦„ì„ ë°©í•´í•˜ì§€ ì•Šë„ë¡ ë³„ë„ì˜ ì“°ë ˆë“œ ìƒì„±
         if (!CreateThread(NULL, 0, ThreadProc, NULL, 0, NULL)) {
             printf("CreateThread failed. Error: %d \n", GetLastError());
             break;
@@ -88,14 +89,15 @@ DWORD WINAPI ThreadProc(LPVOID lpParam) {
         return 1;
     }
 
-    if (!RecvHook()) {
+    /* RecvëŠ” í˜„ì¬ ì‘ë™í•˜ì§€ ì•ŠìŠµë‹ˆë‹¤. (ê°œë°œ ì•ˆí–ˆìŒ) */
+    /*if (!RecvHook()) {
         printf("RecvHook failed. \n");
         return 1;
-    }
+    }*/
 }
 
 DWORD FindPattern(BYTE* targetPattern, DWORD size) {
-    // ¹Ì¸® ¾Ë¾Æ³½ KakaoTalk.exeÀÇ PE imageÀÇ size
+    // ë¯¸ë¦¬ ì•Œì•„ë‚¸ KakaoTalk.exeì˜ PE imageì˜ size
     DWORD imageSize = 0x3E4E000;
 
     BYTE* buffer = (BYTE*)malloc(imageSize);
@@ -123,7 +125,7 @@ DWORD FindPattern(BYTE* targetPattern, DWORD size) {
 }
 
 BOOL SendHook() {
-    // ÆĞÅÏ Ã£±â
+    // íŒ¨í„´ ì°¾ê¸°
     DWORD targetSize = sizeof(g_sendTargetPattern);
     DWORD targetAddress = FindPattern(g_sendTargetPattern, targetSize);
 
@@ -132,13 +134,13 @@ BOOL SendHook() {
         return FALSE;
     }
 
-    // ÈÄÅ· ÈÄ ¸®ÅÏÇÒ ÁÖ¼Ò ÀúÀå
+    // í›„í‚¹ í›„ ë¦¬í„´í•  ì£¼ì†Œ ì €ì¥
     g_sendRetAddr = targetAddress + targetSize;
 
-    // ¿ø·¡ CALL ¸í·ÉÀÇ Àı´ë ÁÖ¼Ò ÀúÀå
-    g_sendOrgCallAddr = g_sendRetAddr + 0x00029F7B;
+    // ì›ë˜ CALL ëª…ë ¹ì˜ ì ˆëŒ€ ì£¼ì†Œ ì €ì¥
+    g_sendOrgCallAddr = g_sendRetAddr + 0x0002A85A;
 
-    // CALL ¸í·É¾î µ¤¾î ¾º¿ì±â
+    // CALL ëª…ë ¹ì–´ ë®ì–´ ì”Œìš°ê¸°
     DWORD jmpAddress = (DWORD)SendPacketPrintRoutine - g_sendRetAddr;
     g_sendTargetPattern[11] = 0xE9;
     memcpy(g_sendTargetPattern + 12, &jmpAddress, sizeof(DWORD));
@@ -158,7 +160,7 @@ BOOL SendHook() {
 }
 
 BOOL RecvHook() {
-    // ÆĞÅÏ Ã£±â
+    // íŒ¨í„´ ì°¾ê¸°
     DWORD targetSize = sizeof(g_recvTargetPattern);
     DWORD targetAddress = FindPattern(g_recvTargetPattern, targetSize);
 
@@ -167,10 +169,10 @@ BOOL RecvHook() {
         return FALSE;
     }
 
-    // ÈÄÅ· ÈÄ ¸®ÅÏÇÒ ÁÖ¼Ò ÀúÀå
+    // í›„í‚¹ í›„ ë¦¬í„´í•  ì£¼ì†Œ ì €ì¥
     g_recvRetAddr = targetAddress + targetSize;
 
-    // ¸í·É¾î µ¤¾î ¾º¿ì±â
+    // ëª…ë ¹ì–´ ë®ì–´ ì”Œìš°ê¸°
     DWORD jmpAddress = (DWORD)RecvPacketPrintRoutine - g_recvRetAddr;
     g_recvTargetPattern[15] = 0xE9;
     memcpy(g_recvTargetPattern + 16, &jmpAddress, sizeof(DWORD));
